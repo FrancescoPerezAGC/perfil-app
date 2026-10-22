@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import Link from "next/link";
 
 type Dica = { ordem: number; texto: string };
 type Perfil = {
@@ -171,6 +172,10 @@ export default function Home() {
       </p>
       <p style={{ textAlign: "right", margin: 0, fontSize: 14, color: "#555" }}>
         Para revisar hoje: {paraRevisar}
+      </p>
+
+      <p style={{ textAlign: "right", margin: "4px 0 0" }}>
+      <Link href="/estatisticas">📊 Estatísticas</Link>
       </p>
 
       <p style={{ marginBottom: 0 }}>{rotulo[tipo]}</p>
