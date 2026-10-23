@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import Link from "next/link";
 
 type Dica = { ordem: number; texto: string };
 type Perfil = {
@@ -15,10 +14,22 @@ type Perfil = {
 type Rev = { proxima_revisao: string; intervalo_dias: number };
 type Revisoes = Record<string, Rev>;
 type Tipo = "revisao" | "novo" | "extra";
+type Filtro = "todas" | "pessoa" | "lugar" | "coisa" | "ano";
+
+const FILTROS: { valor: Filtro; nome: string }[] = [
+  { valor: "todas", nome: "Todas" },
+  { valor: "pessoa", nome: "Pessoas" },
+  { valor: "lugar", nome: "Lugares" },
+  { valor: "coisa", nome: "Coisas" },
+  { valor: "ano", nome: "Anos" },
+];
+
+// quantos perfis recém-jogados ficam de fora do sorteio
+const MEMORIA = 30;
 
 // ignora acentos, maiúsculas e espaços nas pontas
 const norm = (s: string) =>
-  s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+  s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
 
 // datas no formato AAAA-MM-DD, no fuso do aparelho
 const hoje = () => new Date().toLocaleDateString("sv-SE");
@@ -28,8 +39,13 @@ const somarDias = (dias: number) => {
   return d.toLocaleDateString("sv-SE");
 };
 
-function escolher(lista: Perfil[], revs: Revisoes, evitarId?: string) {
-  const base = lista.length > 1 ? lista.filter((p) => p.id !== evitarId) : lista;
+function escolher(lista: Perfil[], revs: Revisoes, recentes: string[]) {
+  // tira os jogados há pouco; se sobrar pouca coisa, relaxa a regra
+  let base = lista.filter((p) => !recentes.includes(p.id));
+  if (base.length === 0) {
+    const ultimo = recentes[recentes.length - 1];
+    base = lista.length > 1 ? lista.filter((p) => p.id !== ultimo) : lista;
+  }
   const h = hoje();
   const vencidos = base.filter((p) => revs[p.id] && revs[p.id].proxima_revisao <= h);
   const novos = base.filter((p) => !revs[p.id]);
@@ -58,6 +74,8 @@ const rotulo: Record<Tipo, string> = {
 export default function Home() {
   const [perfis, setPerfis] = useState<Perfil[]>([]);
   const [revisoes, setRevisoes] = useState<Revisoes>({});
+  const [recentes, setRecentes] = useState<string[]>([]);
+  const [filtro, setFiltro] = useState<Filtro>("todas");
   const [atual, setAtual] = useState<Perfil | null>(null);
   const [tipo, setTipo] = useState<Tipo>("novo");
   const [usadas, setUsadas] = useState(1);
@@ -66,9 +84,15 @@ export default function Home() {
   const [aviso, setAviso] = useState("");
   const [erro, setErro] = useState("");
   const [total, setTotal] = useState(0);
+  const [vazio, setVazio] = useState(false);
 
-  function sortear(lista: Perfil[], revs: Revisoes, evitarId?: string) {
-    const { perfil, tipo } = escolher(lista, revs, evitarId);
+  function sortear(lista: Perfil[], revs: Revisoes, rec: string[]) {
+    if (!lista.length) {
+      setVazio(true);
+      return;
+    }
+    setVazio(false);
+    const { perfil, tipo } = escolher(lista, revs, rec);
     setAtual({ ...perfil, dicas: [...perfil.dicas].sort((a, b) => a.ordem - b.ordem) });
     setTipo(tipo);
     setUsadas(1);
@@ -77,7 +101,16 @@ export default function Home() {
     setAviso("");
   }
 
+  const doFiltro = (f: Filtro, todos: Perfil[] = perfis) =>
+    f === "todas" ? todos : todos.filter((p) => p.categoria === f);
+
   useEffect(() => {
+    let salvo: Filtro = "todas";
+    try {
+      const s = localStorage.getItem("perfil-filtro") as Filtro | null;
+      if (s && FILTROS.some((x) => x.valor === s)) salvo = s;
+    } catch {}
+
     (async () => {
       const [p, r] = await Promise.all([
         supabase
@@ -99,9 +132,19 @@ export default function Home() {
       });
       setPerfis(lista);
       setRevisoes(mapa);
-      if (lista.length) sortear(lista, mapa);
+      setFiltro(salvo);
+      sortear(doFiltro(salvo, lista), mapa, []);
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function trocarFiltro(f: Filtro) {
+    setFiltro(f);
+    try {
+      localStorage.setItem("perfil-filtro", f);
+    } catch {}
+    sortear(doFiltro(f), revisoes, recentes);
+  }
 
   async function finalizar(acertou: boolean) {
     if (!atual) return;
@@ -112,8 +155,9 @@ export default function Home() {
     let intervalo: number;
     let proxima: string;
     if (!acertou) {
+      // errou ou desistiu: volta amanhã (não logo em seguida)
       intervalo = 1;
-      proxima = hoje();
+      proxima = somarDias(1);
     } else if (usadas <= 5) {
       intervalo = Math.min(anterior ? intervaloAnt * 2 : 2, 60);
       proxima = somarDias(intervalo);
@@ -124,6 +168,7 @@ export default function Home() {
 
     setEstado(acertou ? "acertou" : "desistiu");
     setTotal((t) => t + pontos);
+    setRecentes((r) => [...r, atual.id].slice(-MEMORIA));
     setRevisoes((r) => ({
       ...r,
       [atual.id]: { proxima_revisao: proxima, intervalo_dias: intervalo },
@@ -155,18 +200,50 @@ export default function Home() {
   }
 
   if (erro) return <pre style={{ padding: 24 }}>Erro: {erro}</pre>;
-  if (!atual) return <p style={{ padding: 24 }}>Carregando...</p>;
+  if (!atual && !vazio) return <p style={{ padding: 24 }}>Carregando...</p>;
 
-  const fim = estado !== "jogando";
-  const temMais = usadas < atual.dicas.length;
   const h = hoje();
   const paraRevisar = perfis.filter(
     (p) => revisoes[p.id] && revisoes[p.id].proxima_revisao <= h
   ).length;
+
+  const barra = (
+    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+      {FILTROS.map((f) => (
+        <button
+          key={f.valor}
+          onClick={() => trocarFiltro(f.valor)}
+          style={{
+            padding: "6px 12px",
+            fontSize: 14,
+            borderRadius: 999,
+            border: "1px solid #999",
+            background: filtro === f.valor ? "#111" : "#fff",
+            color: filtro === f.valor ? "#fff" : "#111",
+          }}
+        >
+          {f.nome}
+        </button>
+      ))}
+    </div>
+  );
+
+  if (!atual) {
+    return (
+      <main style={{ maxWidth: 520, margin: "0 auto", padding: 20, fontFamily: "system-ui" }}>
+        {barra}
+        <p>Nenhum perfil nessa categoria.</p>
+      </main>
+    );
+  }
+
+  const fim = estado !== "jogando";
+  const temMais = usadas < atual.dicas.length;
   const rev = revisoes[atual.id];
 
   return (
     <main style={{ maxWidth: 520, margin: "0 auto", padding: 20, fontFamily: "system-ui" }}>
+      {barra}
       <p style={{ textAlign: "right", margin: 0 }}>
         Pontos na sessão: <b>{total}</b>
       </p>
@@ -174,14 +251,10 @@ export default function Home() {
         Para revisar hoje: {paraRevisar}
       </p>
 
-      <p style={{ textAlign: "right", margin: "4px 0 0" }}>
-      <Link href="/estatisticas">📊 Estatísticas</Link>
-      </p>
-
       <p style={{ marginBottom: 0 }}>{rotulo[tipo]}</p>
       <h1 style={{ textTransform: "capitalize", marginTop: 4 }}>{atual.categoria}</h1>
       <p>
-        Dica {usadas} de {atual.dicas.length}
+        Dica {usadas} de {atual.dicas.length} · vale {21 - usadas} pontos
       </p>
 
       <ol style={{ paddingLeft: 20, lineHeight: 1.5 }}>
@@ -241,7 +314,7 @@ export default function Home() {
             </p>
           )}
           <button
-            onClick={() => sortear(perfis, revisoes, atual.id)}
+            onClick={() => sortear(doFiltro(filtro), revisoes, recentes)}
             style={{ width: "100%", padding: 14, fontSize: 16 }}
           >
             Próximo perfil
